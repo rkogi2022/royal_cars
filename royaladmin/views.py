@@ -1,8 +1,10 @@
+from django.contrib import messages
 from django.shortcuts import render, get_object_or_404, redirect
 
 from carapp.models import DriverApplication, CarBooking, Newsletter, RideHailing, CarPurchase
-from .models import Car
-from .forms import CarForm
+from .models import Car, Staff
+from .forms import CarForm, StaffForm
+
 
 # Retrieve and display all cars
 def car_list(request):
@@ -64,3 +66,42 @@ def newsletter_list(request):
 def ride_hailing_list(request):
     rides = RideHailing.objects.all()
     return render(request, 'ride_hailing_list.html', {'rides': rides})
+
+# View all staff members
+def staff_list(request):
+    staff_members = Staff.objects.all()
+    return render(request, 'staff_list.html', {'staff_members': staff_members})
+
+# Add a new staff member
+def add_staff(request):
+    if request.method == 'POST':
+        form = StaffForm(request.POST, request.FILES)
+        if form.is_valid():
+            form.save()
+            messages.success(request, 'Staff member added successfully.')
+            return redirect('staff_list')
+    else:
+        form = StaffForm()
+    return render(request, 'staff_form.html', {'form': form})
+
+# Edit staff member details
+def edit_staff(request, pk):
+    staff = get_object_or_404(Staff, pk=pk)
+    if request.method == 'POST':
+        form = StaffForm(request.POST, request.FILES, instance=staff)
+        if form.is_valid():
+            form.save()
+            messages.success(request, 'Staff details updated successfully.')
+            return redirect('staff_list')
+    else:
+        form = StaffForm(instance=staff)
+    return render(request, 'staff_form.html', {'form': form})
+
+# Delete a staff member
+def delete_staff(request, pk):
+    staff = get_object_or_404(Staff, pk=pk)
+    if request.method == 'POST':
+        staff.delete()
+        messages.success(request, 'Staff member deleted successfully.')
+        return redirect('staff_list')
+    return render(request, 'staff_confirm_delete.html', {'staff': staff})

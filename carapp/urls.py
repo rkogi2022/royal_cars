@@ -12,4 +12,5 @@ urlpatterns = [
     path('mpesa-callback/', views.mpesa_callback, name='mpesa_callback'),
     path('cardetails/', views.cardetails, name='cardetails'),
     path('ridehail/<int:car_id>/', views.ridehail, name='ridehail'),
+    path('team_view/', views.team_view, name='team_view'),
 ]

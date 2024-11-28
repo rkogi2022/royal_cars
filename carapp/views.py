@@ -1,4 +1,6 @@
 from datetime import datetime
+
+import requests
 from django.utils import timezone
 from django.contrib import messages
 from django.http import JsonResponse
@@ -7,10 +9,11 @@ from django.views.decorators.csrf import csrf_exempt
 from django_daraja.mpesa.core import MpesaClient
 
 from carapp.forms import DriverApplicationForm, BookCarForm, NewsletterForm, CarPurchaseForm
-from royaladmin.models import Car
+from royaladmin.models import Car, Staff
 from carapp.models import RideHailing, CarBooking
 import logging, json
 
+from royalcars import settings
 
 # Set up logging
 logger = logging.getLogger(__name__)
@@ -51,41 +54,122 @@ def apply_as_driver(request):
 
 
 # Helper function to get MPESA access token
-@csrf_exempt
+def get_mpesa_token():
+    """Get the MPESA access token using OAuth"""
+    url = "https://api.safaricom.co.ke/oauth/v1/generate?grant_type=client_credentials"
+    auth = (settings.MPESA_CONSUMER_KEY, settings.MPESA_CONSUMER_SECRET)
+    response = requests.get(url, auth=auth)
+
+    if response.status_code == 200:
+        response_data = response.json()
+        return response_data['access_token']
+    else:
+        logger.error(f"Failed to get MPESA token: {response.text}")
+        return None
+
+
 def mpesa_callback(request):
     if request.method == "POST":
         try:
             # Parse the JSON data from the request
             data = json.loads(request.body.decode('utf-8'))
 
-            # Extract necessary fields from the response
-            transaction_id = data['Body']['stkCallback']['CheckoutRequestID']
-            result_code = data['Body']['stkCallback']['ResultCode']
-            result_desc = data['Body']['stkCallback']['ResultDesc']
+            # Log the incoming data for debugging
+            logger.debug(f"Callback received: {data}")
 
-            # Find the booking using transaction_id
-            booking = CarBooking.objects.get(transaction_id=transaction_id)
+            # Extract the necessary fields from the callback response
+            stk_callback = data.get('Body', {}).get('stkCallback', {})
+            transaction_id = stk_callback.get('CheckoutRequestID')
+            result_code = stk_callback.get('ResultCode')
+            result_desc = stk_callback.get('ResultDesc')
 
-            if result_code == 0:
-                # Payment successful
+            # Log the payment result details
+            logger.debug(f"Transaction ID: {transaction_id}")
+            logger.debug(f"Result Code: {result_code}")
+            logger.debug(f"Result Description: {result_desc}")
+
+            # Try to find the booking using transaction_id
+            try:
+                booking = CarBooking.objects.get(transaction_id=transaction_id)
+            except CarBooking.DoesNotExist:
+                return JsonResponse({"error": "Booking not found"}, status=404)
+
+            # Handle success or failure
+            if result_code == 0:  # Payment was successful
                 booking.status = 'Success'
                 booking.is_paid = True
-            elif result_code == 1032:
-                # User cancelled/terminated the transaction
+                callback_metadata = stk_callback.get('CallbackMetadata', {}).get('Item', [])
+                amount = next((item.get('Value') for item in callback_metadata if item.get('Name') == 'Amount'), None)
+                mpesa_receipt_number = next(
+                    (item.get('Value') for item in callback_metadata if item.get('Name') == 'MpesaReceiptNumber'), None)
+                phone_number = next(
+                    (item.get('Value') for item in callback_metadata if item.get('Name') == 'PhoneNumber'), None)
+                transaction_date_str = next(
+                    (item.get('Value') for item in callback_metadata if item.get('Name') == 'TransactionDate'), None)
+
+                if transaction_date_str:
+                    transaction_date = timezone.datetime.strptime(transaction_date_str, "%Y%m%d%H%M%S")
+                else:
+                    transaction_date = None
+
+                # Update booking with payment info
+                booking.mpesa_receipt_number = mpesa_receipt_number
+                booking.phone_number = phone_number
+                booking.transaction_date = transaction_date
+                booking.amount = amount
+                booking.save()
+
+                logger.debug(
+                    f"Payment successful for booking {transaction_id}. Amount: {amount}, MpesaReceipt: {mpesa_receipt_number}, Phone: {phone_number}")
+
+            elif result_code == 1032:  # User cancelled the transaction
                 booking.status = 'Terminated'
-            else:
-                # Other errors (transaction failed)
-                booking.status = 'Failed'
+                booking.description = "Transaction cancelled by user"
+                booking.save()
+                logger.debug(f"Transaction {transaction_id} terminated by user.")
 
-            booking.transaction_time = timezone.now()
-            booking.save()
+            else:  # For other failures or unexpected results, initiate payment confirmation
+                logger.debug(f"Transaction {transaction_id} failed, Result: {result_desc}. Reconfirming status...")
 
-            return JsonResponse({"message": "Callback received successfully"})
+                # Reconfirm the payment status with the MPESA API if needed
+                access_token = get_mpesa_token()
+                if not access_token:
+                    return JsonResponse({"error": "Failed to retrieve MPESA access token"}, status=500)
+
+                headers = {'Authorization': f'Bearer {access_token}'}
+                query_url = f"{MPESA_API_URL}?CheckoutRequestID={transaction_id}"
+                mpesa_response = requests.get(query_url, headers=headers)
+
+                if mpesa_response.status_code == 200:
+                    mpesa_response_data = mpesa_response.json()
+
+                    # Log the response from MPESA for debugging
+                    logger.debug(f"MPESA payment confirmation response: {mpesa_response_data}")
+
+                    # Confirm the payment status
+                    if mpesa_response_data.get("Body", {}).get("stkCallback", {}).get("ResultCode") == 0:
+                        booking.status = 'Success'
+                        booking.is_paid = True
+                        logger.debug(f"Payment confirmed for transaction {transaction_id} after recheck.")
+                    else:
+                        booking.status = 'Failed'
+                        booking.description = "Payment failed after retry."
+                        logger.debug(f"Payment failure confirmed for transaction {transaction_id}.")
+                else:
+                    booking.status = 'Failed'
+                    booking.description = "Failed to confirm payment with MPESA."
+                    logger.error(
+                        f"Failed to confirm payment for {transaction_id}. MPESA response: {mpesa_response.text}")
+
+                booking.save()
+
+            return JsonResponse({"message": "Callback processed successfully"}, status=200)
+
         except Exception as e:
+            logger.error(f"Error processing callback: {str(e)}")
             return JsonResponse({"error": str(e)}, status=400)
 
     return JsonResponse({"error": "Invalid request method"}, status=405)
-
 
 
 def book_car(request, car_id):
@@ -223,3 +307,9 @@ def ridehail(request, car_id):
         return redirect('cardetails')  # Define this URL for a success message
 
     return render(request, 'ridehailing.html', {'car': car})
+
+def team_view(request):
+    staff_members = Staff.objects.all()  # Fetch all staff members
+    context= {'staff_members': staff_members}
+    template_name = 'team.html'
+    return render(request, template_name, context)

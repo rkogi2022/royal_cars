@@ -17,3 +17,15 @@ class Car(models.Model):
     def __str__(self):
         return self.name
 
+class Staff(models.Model):
+    passportimage = models.ImageField(upload_to='staff_images/', blank=True)
+    name = models.CharField(max_length=100)
+    age = models.IntegerField()
+    gender = models.CharField(max_length=100)
+    desgination = models.CharField(max_length=100)
+    twitter_link = models.URLField(blank=True, null=True)
+    facebook_link = models.URLField(blank=True, null=True)
+    linkedin_link = models.URLField(blank=True, null=True)
+
+    def __str__(self):
+        return self.name, self.desgination
